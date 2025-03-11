@@ -35,7 +35,7 @@ class DesktopHomePage extends StatefulWidget {
 const borderColor = Color(0xFF2F65BA);
 
 class _DesktopHomePageState extends State<DesktopHomePage>
-    with AutomaticKeepAliveClientMixin {
+    with AutomaticKeepAliveClientMixin, WidgetsBindingObserver {
   final _leftPaneScrollController = ScrollController();
 
   @override
@@ -51,6 +51,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
   bool isCardClosed = false;
 
   final RxBool _editHover = false.obs;
+  final RxBool _block = false.obs;
 
   final GlobalKey _childKey = GlobalKey();
 
@@ -58,14 +59,20 @@ class _DesktopHomePageState extends State<DesktopHomePage>
   Widget build(BuildContext context) {
     super.build(context);
     final isIncomingOnly = bind.isIncomingOnly();
-    return Row(
+    return _buildBlock(
+        child: Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         buildLeftPane(context),
         if (!isIncomingOnly) const VerticalDivider(width: 1),
         if (!isIncomingOnly) Expanded(child: buildRightPane(context)),
       ],
-    );
+    ));
+  }
+
+  Widget _buildBlock({required Widget child}) {
+    return buildRemoteBlock(
+        block: _block, mask: true, use: canBeBlocked, child: child);
   }
 
   Widget buildLeftPane(BuildContext context) {
@@ -127,12 +134,17 @@ class _DesktopHomePageState extends State<DesktopHomePage>
         color: Theme.of(context).colorScheme.background,
         child: Stack(
           children: [
-            SingleChildScrollView(
-              controller: _leftPaneScrollController,
-              child: Column(
-                key: _childKey,
-                children: children,
-              ),
+            Column(
+              children: [
+                SingleChildScrollView(
+                  controller: _leftPaneScrollController,
+                  child: Column(
+                    key: _childKey,
+                    children: children,
+                  ),
+                ),
+                Expanded(child: Container())
+              ],
             ),
             if (isOutgoingOnly)
               Positioned(
@@ -230,7 +242,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
                         style: TextStyle(
                           fontSize: 22,
                         ),
-                      ),
+                      ).workaroundFreezeLinuxMint(),
                     ),
                   )
                 ],
@@ -326,7 +338,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
                                   EdgeInsets.only(top: 14, bottom: 10),
                             ),
                             style: TextStyle(fontSize: 15),
-                          ),
+                          ).workaroundFreezeLinuxMint(),
                         ),
                       ),
                       if (showOneTime)
@@ -423,7 +435,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
         bind.mainUriPrefixSync().contains('rustdesk')) {
       return buildInstallCard(
           "Status",
-          "There is a newer version of ${bind.mainGetAppNameSync()} ${bind.mainGetNewVersion()} available.",
+          "${translate("new-version-of-{${bind.mainGetAppNameSync()}}-tip")} (${bind.mainGetNewVersion()}).",
           "Click to download", () async {
         final String newVersion = bind.mainGetNewVersion();
         final Uri url = Uri.parse('https://github.com/AhmedNSane/rustdesk/releases/download/$newVersion/rustdesk-$newVersion-x86_64.msi');
@@ -764,6 +776,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
         await connectMainDesktop(
           call.arguments['id'],
           isFileTransfer: call.arguments['isFileTransfer'],
+          isViewCamera: call.arguments['isViewCamera'],
           isTcpTunneling: call.arguments['isTcpTunneling'],
           isRDP: call.arguments['isRDP'],
           password: call.arguments['password'],
@@ -778,9 +791,15 @@ class _DesktopHomePageState extends State<DesktopHomePage>
         } catch (e) {
           debugPrint("Failed to parse window id '${call.arguments}': $e");
         }
-        if (windowId != null) {
+        WindowType? windowType;
+        try {
+          windowType = WindowType.values.byName(args[3]);
+        } catch (e) {
+          debugPrint("Failed to parse window type '${call.arguments}': $e");
+        }
+        if (windowId != null && windowType != null) {
           await rustDeskWinManager.moveTabToNewWindow(
-              windowId, args[1], args[2]);
+              windowId, args[1], args[2], windowType);
         }
       } else if (call.method == kWindowEventOpenMonitorSession) {
         final args = jsonDecode(call.arguments);
@@ -788,9 +807,10 @@ class _DesktopHomePageState extends State<DesktopHomePage>
         final peerId = args['peer_id'] as String;
         final display = args['display'] as int;
         final displayCount = args['display_count'] as int;
+        final windowType = args['window_type'] as int;
         final screenRect = parseParamScreenRect(args);
         await rustDeskWinManager.openMonitorSession(
-            windowId, peerId, display, displayCount, screenRect);
+            windowId, peerId, display, displayCount, screenRect, windowType);
       } else if (call.method == kWindowEventRemoteWindowCoords) {
         final windowId = int.tryParse(call.arguments);
         if (windowId != null) {
@@ -806,6 +826,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
         _updateWindowSize();
       });
     }
+    WidgetsBinding.instance.addObserver(this);
   }
 
   _updateWindowSize() {
@@ -827,11 +848,16 @@ class _DesktopHomePageState extends State<DesktopHomePage>
     _uniLinksSubscription?.cancel();
     Get.delete<RxBool>(tag: 'stop-service');
     _updateTimer?.cancel();
-    if (!bind.isCustomClient()) {
-      platformFFI.unregisterEventHandler(
-          kCheckSoftwareUpdateFinish, kCheckSoftwareUpdateFinish);
-    }
+    WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (state == AppLifecycleState.resumed) {
+      shouldBeBlocked(_block, canBeBlocked);
+    }
   }
 
   Widget buildPluginEntry() {
@@ -924,7 +950,7 @@ void setPasswordDialog({VoidCallback? notEmptyCallback}) async {
                       });
                     },
                     maxLength: maxLength,
-                  ),
+                  ).workaroundFreezeLinuxMint(),
                 ),
               ],
             ),
@@ -951,7 +977,7 @@ void setPasswordDialog({VoidCallback? notEmptyCallback}) async {
                       });
                     },
                     maxLength: maxLength,
-                  ),
+                  ).workaroundFreezeLinuxMint(),
                 ),
               ],
             ),
